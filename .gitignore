@@ -21,6 +21,7 @@ _version.py
 *~
 *.sass-cache
 *.egg-info
+*.spec
 
 # OS or Editor folders
 .DS_Store
