@@ -1,6 +1,6 @@
 """Environment Editor"""
 
-from functools import partial
+from enum import Enum
 import os.path
 import pprint
 import sys
@@ -29,26 +29,55 @@ class AutoScrollbar(ttk.Scrollbar):
         raise tk.TclError("cannot use place with this widget")
 
 
+class SelectionMode(Enum):
+    MODE_NONE = 0
+    MODE_SYSTEM = 1
+    MODE_USER = 2
+    MODE_COMMON = 3
+
+
 class EnvFrame(tk.PanedWindow):
     def __init__(self, master, env):
         super().__init__(master, orient=tk.HORIZONTAL)
+        self._master = master
         self._env = env
-        self._system_ids = {}
-        self._user_ids = {}
-        self._shared_ids = {}
+        self._tv_ids_system = {}
+        self._tv_ids_user = {}
+        self._tv_ids_shared = {}
+        self._button_ids = {}
 
         self._tv = None
-        self._tv_vsb = None
+        self._mode = SelectionMode.MODE_NONE
+
         self._create_widgets()
-        self.grid(row=0, column=0, sticky=tk.NSEW)
+
+        self.configure(bg="#66AFE0")
         self.columnconfigure(0, weight=0)
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
+        self.grid(row=0, column=0, sticky=tk.NSEW)
 
-    def _create_widgets(self):
+    def _update_treeview(self):
+        system = self._tv.insert('', 'end', 'system', text='System')
+        user = self._tv.insert('', 'end', 'user', text='User')
+        common = self._tv.insert('', 'end', 'common', text='Common')
+
+        for key in sorted(list(self._env.system.keys())):
+            _id = self._tv.insert(system, 'end', text=key)
+            self._tv_ids_system[_id] = key
+
+        for key in sorted(list(self._env.user.keys())):
+            _id = self._tv.insert(user, 'end', text=key)
+            self._tv_ids_user[_id] = key
+
+        for key in sorted(list(self._env.shared_variables())):
+            _id = self._tv.insert(common, 'end', text=key)
+            self._tv_ids_shared[_id] = key
+
+    def _create_left_frame(self):
         _left = tk.Frame(self)
-        _tv_frame = tk.Frame(_left)
 
+        _tv_frame = tk.Frame(_left)
         self._tv = ttk.Treeview(_tv_frame)
         self._tv.heading('#0', text="Environment Variables", anchor=tk.W)
 
@@ -57,34 +86,24 @@ class EnvFrame(tk.PanedWindow):
 
         self._tv.configure(yscrollcommand=_tv_vsb.set)
 
-        system = self._tv.insert('', 'end', 'system', text='System')
-        for key, value in self._env.system.items():
-            _id = self._tv.insert(system, 'end', text=key, values=value)
-            self._system_ids[_id] = key
-
-        user = self._tv.insert('', 'end', 'user', text='User')
-        for key, value in self._env.user.items():
-            _id = self._tv.insert(user, 'end', text=key)
-            self._user_ids[_id] = key
-
-        common = self._tv.insert('', 'end', 'common', text='Common')
-        for key in self._env.shared_keys():
-            _id = self._tv.insert(common, 'end', text=key)
-            self._shared_ids[_id] = key
+        self._update_treeview()
 
         self._tv.grid(row=0, column=0, sticky=tk.NSEW)
         _tv_vsb.grid(row=0, column=1, sticky=(tk.NS, tk.E))
 
         _tv_frame.grid(row=0, column=0, sticky=tk.NSEW, padx=(4,4), pady=(2,2))
         _tv_frame.rowconfigure(0, weight=1)
+        _tv_frame.rowconfigure(1, weight=0)
         _tv_frame.columnconfigure(0, weight=1)
         _tv_frame.columnconfigure(1, weight=0)
 
         _tv_button_frame = tk.Frame(_left)
-        btn = ttk.Button(_tv_button_frame, text="Add")
+        btn = ttk.Button(_tv_button_frame, text='Add', state='disabled')
         btn.grid(row=0, column=0, sticky=tk.W)
-        self._delete_btn = ttk.Button(_tv_button_frame, text="Delete", state='disabled')
-        self._delete_btn.grid(row=0, column=1, sticky=tk.W)
+        self._button_ids['add_variable'] = btn
+        btn = ttk.Button(_tv_button_frame, text='Delete', state='disabled')
+        btn.grid(row=0, column=1, sticky=tk.W)
+        self._button_ids['delete_variable'] = btn
         _tv_button_frame.grid(row=1, column=0, sticky=tk.W, padx=(4,4), pady=(2,2))
         _tv_button_frame.columnconfigure(0, weight=1)
 
@@ -97,33 +116,47 @@ class EnvFrame(tk.PanedWindow):
         self.add(_left, stretch='never')
         self.paneconfigure(_left, minsize=200)
 
+        self._tv.bind('<<TreeviewSelect>>', self._tv_click)
+
+    def _create_right_frame(self):
         _right = tk.Frame(self)
 
         self._element_frame = tk.Frame(_right)
         self._listbox = tk.Listbox(self._element_frame, relief=tk.FLAT)
         _listbox_vsb = AutoScrollbar(self._element_frame, orient=tk.VERTICAL)
         _listbox_vsb.configure(command=self._listbox.yview)
-        self._listbox.configure(yscrollcommand=_listbox_vsb.set)
+        _listbox_hsb = AutoScrollbar(self._element_frame, orient=tk.HORIZONTAL)
+        _listbox_hsb.configure(command=self._listbox.xview)
+        self._listbox.configure(yscrollcommand=_listbox_vsb.set, xscrollcommand=_listbox_hsb.set)
+
+        self._listbox.bind('<<ListboxSelect>>', self._listbox_select)
 
         self._listbox.grid(row=0, column=0, sticky=tk.NSEW, padx=4, pady=2)
-        _listbox_vsb.grid(row=0, column=1, sticky=tk.NS, padx=4, pady=2)
+        _listbox_vsb.grid(row=0, column=1, sticky=(tk.NS, tk.E), padx=4, pady=2)
+        _listbox_hsb.grid(row=1, column=0, sticky=(tk.S, tk.EW), padx=4, pady=2)
 
         self._element_frame.grid(row=0, column=0, sticky=tk.NSEW)
         self._element_frame.columnconfigure(0, weight=1)
         self._element_frame.columnconfigure(1, weight=0)
         self._element_frame.rowconfigure(0, weight=1)
+        self._element_frame.rowconfigure(1, weight=0)
 
         _button_frame = tk.Frame(_right)
-        btn = ttk.Button(_button_frame, text="Add", command=self._btn_add)
+        btn = ttk.Button(_button_frame, text="Edit", command=self._btn_edit, state='disabled')
         btn.grid(row=0, column=0, pady=2)
-        btn = ttk.Button(_button_frame, text="Edit", command=self._btn_edit)
-        btn.grid(row=1, column=0, pady=2)
-        btn = ttk.Button(_button_frame, text="Delete", command=self._btn_delete)
+        self._button_ids['edit'] = btn
+        btn = ttk.Button(_button_frame, text="Add", command=self._btn_add, state='disabled')
+        btn.grid(row=1, column=0, pady=(12,2))
+        self._button_ids['add'] = btn
+        btn = ttk.Button(_button_frame, text="Delete", command=self._btn_delete, state='disabled')
         btn.grid(row=2, column=0, pady=2)
-        btn = ttk.Button(_button_frame, text="Move Up", command=self._btn_move_up)
+        self._button_ids['delete'] = btn
+        btn = ttk.Button(_button_frame, text="Move Up", command=self._btn_move_up, state='disabled')
         btn.grid(row=4, column=0, pady=(12,2))
-        btn = ttk.Button(_button_frame, text="Move Down", command=self._btn_move_down)
+        self._button_ids['move_up'] = btn
+        btn = ttk.Button(_button_frame, text="Move Down", command=self._btn_move_down, state='disabled')
         btn.grid(row=5, column=0, pady=2)
+        self._button_ids['move_down'] = btn
         _button_frame.grid(row=0, column=1, sticky=(tk.NS, tk.E), padx=4, pady=2)
 
         _right.configure(width=200)
@@ -135,32 +168,153 @@ class EnvFrame(tk.PanedWindow):
         self.add(_right, stretch='always')
         self.paneconfigure(_right, minsize=200)
 
-        self.configure(bg="#66AFE0")
+    def _create_widgets(self):
+        self._create_left_frame()
+        self._create_right_frame()
 
-        self._tv.bind('<<TreeviewSelect>>', self._tv_click)
+    def _enable_button_by_id(self, id_):
+        self._master.nametowidget(id_).configure(state='enabled')
 
-    def _tv_click(self, widget=None):
+    def _disable_button_by_id(self, id_):
+        self._master.nametowidget(id_).configure(state='disabled')
+
+    def _enable_button_by_name(self, name):
+        self._enable_button_by_id(self._button_ids[name])
+
+    def _disable_button_by_name(self, name):
+        self._disable_button_by_id(self._button_ids[name])
+
+    def _disable_all_buttons(self):
+        for btn_id in self._button_ids.values():
+            self._disable_button_by_id(btn_id)
+
+    def _enable_all_buttons(self):
+        for btn_id in self._button_ids.values():
+            self._enable_button_by_id(btn_id)
+
+    def _disable_variable_buttons(self):
+        for name in ['add', 'edit', 'delete', 'move_up', 'move_down']:
+            self._disable_button_by_name(name)
+
+    @property
+    def mode(self):
+        return self._mode
+
+    @mode.setter
+    def mode(self, new_mode):
+        if new_mode != self._mode:
+            if new_mode == SelectionMode.MODE_COMMON:
+                print('mode: common')
+                self._mode_common()
+            elif new_mode == SelectionMode.MODE_SYSTEM:
+                print('mode: system')
+                self._mode_variable()
+            elif new_mode == SelectionMode.MODE_USER:
+                print('mode: user')
+                self._mode_variable()
+
+            self._mode = new_mode
+
+    def _mode_variable(self):
+        for name in ['add_variable', 'delete_variable']:
+            self._enable_button_by_name(name)
+
+    def _mode_common(self):
+        self._disable_all_buttons()
+
+    def _mode_none(self):
+        self._disable_all_buttons()
+
+    def _tv_click(self, event=None):
+        self._listbox.delete(0, tk.END)
         _id = self._tv.focus()
-        value = ''
-        key = self._shared_ids.get(_id, None)
+        self._disable_button_by_name('move_up')
+        self._disable_button_by_name('move_down')
+        value = None
+        key = self._tv_ids_shared.get(_id, None)
         if key:
-            env_values = self._env.get(key)
-            value = pprint.pformat(list(env_values.values()))
+            env_values = self._env.get(key, location=EnvLocation.ENV_BOTH, exact=True)
+            value = list(env_values.values())[0]
+            self._mode = SelectionMode.MODE_COMMON
+            self._mode_common()
+            self._update_listbox(value, show_location=True)
         else:
-            key = self._system_ids.get(_id, None)
+            key = self._tv_ids_system.get(_id, None)
             if key:
-                value = self._env.get(key, location=EnvLocation.ENV_SYSTEM)
-                self._delete_btn.configure(state='enabled')
+                env_values = self._env.get(key, location=EnvLocation.ENV_SYSTEM, exact=True)
+                value = list(env_values.values())[0]
+                self._mode = SelectionMode.MODE_SYSTEM
+                self._mode_variable()
+                self._update_listbox(value)
             else:
-                key = self._user_ids.get(_id, None)
+                key = self._tv_ids_user.get(_id, None)
                 if key:
-                    value = self._env.get(key, location=EnvLocation.ENV_USER)
-                    self._delete_btn.configure(state='enabled')
+                    env_values = self._env.get(key, location=EnvLocation.ENV_USER, exact=True)
+                    value = list(env_values.values())[0]
+                    self._mode = SelectionMode.MODE_USER
+                    self._mode_variable()
+                    self._update_listbox(value)
                 else:
-                    self._delete_btn.configure(state='disabled')
+                    if _id == 'common':
+                        self._mode = SelectionMode.MODE_COMMON
+                        self._disable_all_buttons()
+                    elif _id == 'system':
+                        self._mode = SelectionMode.MODE_SYSTEM
+                        self._enable_button_by_name('add_variable')
+                        self._disable_button_by_name('delete_variable')
+                    elif _id == 'user':
+                        self._mode = SelectionMode.MODE_USER
+                        self._enable_button_by_name('add_variable')
+                        self._disable_button_by_name('delete_variable')
 
-        if isinstance(value, list):
-            self._fill_listbox(value)
+    def _update_listbox(self, value, show_location=False):
+        _prefixes = {'system': 'S:', 'user': 'U:'}
+
+        self._listbox.delete(0, tk.END)
+        for _location, key in value.items():
+            if isinstance(key.value, list):
+                for item in key.value:
+                    if show_location:
+                        item = '%s %s' % (_prefixes[_location], item)
+                    self._listbox.insert(tk.END, item)
+            else:
+                if show_location:
+                    item = '%s %s' % (_prefixes[_location], key.value)
+                else:
+                    item = key.value
+                self._listbox.insert(tk.END, item)
+
+    def _listbox_select(self, event=None):
+        if self._mode == SelectionMode.MODE_USER or self._mode == SelectionMode.MODE_SYSTEM:
+            self._mode_variable()
+            self._variable_select()
+
+    def _variable_select(self):
+        if self._mode == SelectionMode.MODE_COMMON or self._mode == SelectionMode.MODE_NONE:
+            self._disable_all_buttons()
+
+        for name in ['add', 'edit', 'delete']:
+            self._enable_button_by_name(name)
+
+        item_count = self._listbox.size()
+        cur_selection = self._listbox.curselection()
+        if cur_selection and item_count > 1:
+            cur_selection = int(cur_selection[0])
+            #start of list
+            if cur_selection == 0:
+                self._disable_button_by_name('move_up')
+                self._enable_button_by_name('move_down')
+            # end of list
+            elif cur_selection == item_count - 1:
+                self._enable_button_by_name('move_up')
+                self._disable_button_by_name('move_down')
+            else:
+                self._enable_button_by_name('move_up')
+                self._enable_button_by_name('move_down')
+        else:
+            self._disable_button_by_name('move_up')
+            self._disable_button_by_name('move_down')
+
 
     def _btn_add(self):
         pass
@@ -177,13 +331,11 @@ class EnvFrame(tk.PanedWindow):
     def _btn_move_down(self):
         pass
 
-    def _fill_listbox(self, items):
-        pass
-
 
 class EnvEditor():
     def __init__(self):
         self._root = tk.Tk()
+        self._create_menu()
 
         bitmap_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'favicon.gif')
         if os.path.exists(bitmap_path):
@@ -191,17 +343,17 @@ class EnvEditor():
             self._root.iconphoto(True, img)
 
         if sys.platform == 'win32':
-            self.store = WindowsEnvStore()
+            self._store = WindowsEnvStore()
             self._root.title('Windows Environment Editor')
+
         self._frame = None
 
-        self._create_menu()
-
     def run(self):
-        self.store.load()
-        self._frame = EnvFrame(self._root, self.store.env)
+        self._store.update()
 
+        self._frame = EnvFrame(self._root, self._store.env)
         self._frame.grid(row=0, column=0, sticky=tk.NSEW)
+
         self._root.columnconfigure(0, weight=1)
         self._root.rowconfigure(0, weight=1)
 
@@ -220,6 +372,7 @@ class EnvEditor():
             quit_label = 'Exit'
             quit_underline = 1
             quit_accel = 'Alt + F4'
+            self._root.bind_all('<Control-Key-n>', self._command_new)
         elif 'darwin' in sys.platform:
             first_label = 'Env Editor'
             first_underline = -1
@@ -228,6 +381,7 @@ class EnvEditor():
             quit_label = 'Quit'
             quit_underline = 0
             quit_accel = 'Cmd + Q'
+            self._root.bind_all('<Command-n>', self._command_new)
         elif 'linux' in sys.platform:
             first_label = 'File'
             first_underline = 0
@@ -236,12 +390,12 @@ class EnvEditor():
             quit_label = 'Quit'
             quit_underline = 0
             quit_accel = 'Ctrl + Q'
+            self._root.bind_all('<Control-Key-n>', self._command_new)
 
         menu = tk.Menu(self._root, tearoff=False)
         menu_file = tk.Menu(menu, tearoff=False)
 
         menu_file.add_command(label='New Variable...', command=self._command_new, accelerator=new_accel, underline=new_underline)
-        self._root.bind_all('<Control-Key-n>', self._command_new)
 
         menu_file.add_command(label='Import', command=self._command_import, underline=0)
         menu_file.add_command(label='Export', command=self._command_export, underline=0)
@@ -251,9 +405,6 @@ class EnvEditor():
         else:
             menu.add_cascade(label=first_label, menu=menu_file)
         self._root.configure(menu=menu)
-
-    def _btn_(self, event=None):
-        print('command')
 
     def _command_new(self, event=None):
         print('New')
